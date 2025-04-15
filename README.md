@@ -49,6 +49,7 @@ redcap_missing_data(
   forms = c("contact_form", "visit_form"),  # Forms to extract data from
   check_miss = TRUE  # Check for missingness
 )
+```
 
 This will return a dataframe with the following columns:
 
@@ -75,6 +76,7 @@ This summary shows the frequency of missing data for each field in the specified
 ```r
 install.packages("httr")
 install.packages("dplyr")
+```
 
 - **Branching Logic**: Ensure that your REDCap project has valid and active branching logic. The function uses this logic to determine whether fields should be considered missing or not.
 - **Checkbox Fields**: When check_miss = TRUE, the function will check whether all checkbox options are selected. If any option is missing, the field will be marked as "Missing Data."
