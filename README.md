@@ -19,8 +19,7 @@ Logic-aware missingness checker for REDCap projects. It pulls metadata and recor
 | `url`         | `character`         | `NULL`  | The URL to the REDCap API endpoint. This is the base URL used for making API calls, e.g., `"https://redcap.example.com/api/"`.                              |
 | `events`      | `character vector`  | `NULL`  | A vector of event names. The function will extract data only for the specified events (e.g., `"event_1", "event_2"`). Ensure that these match the event names in your REDCap project. |
 | `fields`      | `character vector`  | `NULL`  | A vector of field names. These are the variables from your REDCap project that you wish to analyze for missingness.                                           |
-| `forms`       | `character vector`  | `NULL`  | A vector of form names. These are the forms from which you wish to extract data (e.g., `"contact_form", "survey_form"`).                                     |
-| `check_miss`  | `logical`           | `TRUE`  | If set to `TRUE`, the function will evaluate whether each field is missing based on branching logic and whether all necessary values in checkbox fields are filled out. |
+| `forms`       | `character vector`  | `NULL`  | A vector of form names. These are the forms from which you wish to extract data (e.g., `"contact_form", "survey_form"`).                         
 
 ---
 
