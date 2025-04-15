@@ -2,6 +2,7 @@
 
 Logic-aware missingness checker for REDCap projects. It pulls metadata and records from REDCap, processes branching logic and checkboxes, and classifies missingness according to predefined rules.
 
+#### 💡 Link to Code: https://github.com/NUMesCtrData/REDCap-Missingness-Determination/blob/main/redcap_missing_data
 ---
 
 ### 🧠 Purpose
