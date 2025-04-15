@@ -1,0 +1,605 @@
+# Throughout the program when reading or writing from one drive use the example below code:
+# write.csv(df, paste(od_loc, "file pathway within the one drive/file name", sep=""), row.names=F)
+# df <- read.csv(paste(od_loc, "file pathway within the one drive/file name", sep=""))
+
+
+redcap_missing_data <- function(redcap_id_variable=NULL, 
+                                form=NULL, 
+                                events=NULL, 
+                                token=NULL, 
+                                url = "https://redcap.nubic.northwestern.edu/redcap/api/",
+                                output_loc = paste0(od_loc, "MC Data Management/",
+                                                    "Data Organization and Planning/Data Checks/Output/")
+                                ){
+  # API Variable Pull Function ----
+  
+  # Define the function
+  load_fields_forms_events <- function(fields=NULL,forms=NULL,events=NULL){
+    formData_length = length(formData)
+    # Add the user defined "fields" list to "formData" list of parameters
+    # only if the user provides fields
+    if(!is.null(fields) & length(fields)>0){
+      for (field_idx in 1:length(fields)){
+        # Ex. apend 'name'='global_id'
+        formData <<- append(formData, list(name=fields[field_idx]))
+        # Ex. change 'name' to 'field[0]'
+        names(formData)[formData_length+field_idx] <<- paste("fields[",field_idx-1,"]", sep="")
+      }
+    } else {
+      field_idx=0
+    }
+    
+    # Add the user defined "forms" list to "formData" list of parameters
+    # only if the user provides forms
+    
+    if(!is.null(forms) & length(forms)>0){
+      for (form_idx in 1:length(forms)){
+        # if the form name was entered the name with underscores, we can probably
+        # read that right in. 
+        if (str_detect(forms[form_idx], "_")){ 
+          form = forms[form_idx]
+          # if there are not underscores in the event name, make everything
+          # lowercase and replace spaces with underscores
+        } else {
+          form = tolower(str_replace_all(forms[form_idx], " ", "_"))}
+        formData <<- append(formData, list(name=form))
+        names(formData)[formData_length+field_idx+form_idx] <<- paste("forms[",form_idx-1,"]", sep="")
+      }
+    } else {
+      form_idx=0
+    }
+    
+    # Add the user defined "event" list to "formData" list of parameters
+    # only if the user provides event
+    if(!is.null(events) & length(events)>0){
+      # Add the "events" list above to "formData" list of parameters
+      for (event_idx in 1:length(events)){
+        # If the event name has "_arm_1" included, it can probably be pulled as is 
+        # from REDCap
+        if (str_detect(events[event_idx], "_arm_1")){ 
+          event = events[event_idx]
+          # If the event name does not have "_arm_1" included, add "_arm_1". Only 
+          # Works with studies with one arm. 
+        } else {
+          event = paste(tolower(events[event_idx]), "_arm_1", sep="")
+          event = str_replace_all(event, " ", "_")}
+        formData <<- append(formData, list(name=event))
+        names(formData)[formData_length+field_idx+form_idx+event_idx] <<- paste("events[",event_idx-1,"]", sep="")
+      }
+    }
+  }
+  
+  # Read in REDCap Data Dictionary
+  formData <- list("token"=token,
+                   content='metadata',
+                   format='csv',
+                   returnFormat='csv'
+  )
+  response <- httr::POST(url, body = formData, encode = "form")
+  data_dictionary <- httr::content(response, col_types = cols(.default = "c"))
+  
+  # Clean the data dictionary
+  dd <- data_dictionary %>%
+    select(1:6,12) %>%
+    dplyr::rename(response_options=6) %>%
+    dplyr::rename(branching_logic=7) %>%
+    mutate(index = row_number()) %>%
+    mutate(index_checkboxes="") %>%
+    mutate(checkbox_labels="") %>%
+    filter(field_type!="descriptive")
+  
+  # Identify all check box variables
+  checkboxes <- dd %>%
+    filter(field_type=="checkbox")
+  
+  dd1 <- dd
+  
+  # Create for loop, looping through each checkbox variable to create
+  # all variables and add them to the parent dataset
+  for (x in 1:nrow(checkboxes)){
+    response_values <- checkboxes$response_options[x] 
+    response_values <- as.vector(strsplit(response_values, split = "\\| "))
+    response_values <- tolower(str_replace(response_values[[1]], ",.*", ""))
+    field_name <- paste(checkboxes$field_name[x], response_values, sep="___")
+    
+    field_label <- checkboxes$response_options[x]
+    field_label <- as.vector(strsplit(field_label, split = "\\| "))
+    field_label <- str_replace(field_label[[1]], ".*?,", "")
+    field_label <- trimws(field_label, which = c("both"), whitespace = "[ \t\r\n]")
+    
+    expanded_variables <<- data.frame(field_name, field_label) %>%
+      mutate(form_name=checkboxes$form_name[x]) %>%
+      mutate(section_header=checkboxes$section_header[x]) %>%
+      mutate(field_type="modified checkbox") %>%
+      mutate(checkbox_labels = field_label) %>%
+      mutate(field_label=paste(checkboxes$field_label[x], field_label, sep=": ")) %>%
+      mutate(response_options="1, Checked | 0, Not Checked") %>%
+      mutate(branching_logic=checkboxes$branching_logic[x]) %>%
+      mutate(index=checkboxes$index[x]) %>%
+      mutate(index_checkboxes=row_number())
+    
+    dd1 <- rbind(dd1, expanded_variables)
+  }
+  
+  dd_checkbox <- dd1 %>%
+    filter(field_type!="modified checkbox")
+  
+  dd_mod_checkbox <- dd1 %>%
+    filter(field_type!="checkbox")
+  
+  
+  dd_branching <- dd_checkbox %>%
+    filter(!is.na(branching_logic)) %>%
+    select(field_name, branching_logic) %>%
+    mutate(branching_logic = tolower(branching_logic)) %>%
+    # Fix Checkboxes variables
+    
+    # All exported checkboxes will look like this ch_var___1
+    # But in the branching logic, that variable will look like ch_var(1)
+    # The below code trasforms check box veriables to the "___" format. 
+    
+    # For all branching logic using checkboxes, replace "(" with ___ to
+    # mirror how variables are exported from REDCap
+    mutate(branching_logic = case_when(
+      str_detect(branching_logic, "\\((?=[:digit:])") 
+      & str_detect(branching_logic, "datediff", negate=T) 
+      ~ str_replace_all(branching_logic, "\\((?=[:digit:])", "___"), 
+      T ~ branching_logic
+    )) %>%
+    mutate(branching_logic = case_when(
+      str_detect(branching_logic, "\\((?=[:alpha:])") 
+      & str_detect(branching_logic, "datediff", negate=T) 
+      ~ str_replace_all(branching_logic, "\\((?=[:alpha:])", "___"), 
+      T ~ branching_logic
+    )) %>%
+    # remove the last ")" from the end and replace with nothing
+    mutate(branching_logic = case_when(
+      str_detect(branching_logic, "\\)(?=\\])") 
+      & str_detect(branching_logic, "datediff", negate=T) 
+      ~ str_replace_all(branching_logic, "\\)(?=\\])", ""), 
+      T ~ branching_logic
+    )) %>%
+    
+    # create a new column to hold the list of all variables included
+    # in each branching logic
+    mutate(branch_vars = as.character(str_extract_all(branching_logic, "\\[(.*?)\\]"))) %>%
+    mutate(branch_vars = str_replace_all(branch_vars, "\\[", "")) %>%
+    mutate(branch_vars = str_replace_all(branch_vars, "\\]", "")) %>%
+    
+    # transform REDCap logic to R logic for the branching_logic column
+    mutate(branching_logic = str_replace_all(tolower(branching_logic), "[:space:]and[:space:]", " & ")) %>%
+    mutate(branching_logic = str_replace_all(tolower(branching_logic), "[:space:]or[:space:]", " | ")) %>%
+    
+    mutate(branching_logic = str_remove_all(branching_logic, "[:space:]")) %>%
+    mutate(branching_logic = str_replace_all(branching_logic, "\"", "\'")) %>%
+    
+    #Remove "c()" and all quotes from branching vars column
+    mutate(branch_vars = str_remove_all(branch_vars, "c\\(")) %>%
+    mutate(branch_vars = str_remove_all(branch_vars, "\\)"))%>%
+    mutate(branch_vars = str_remove_all(branch_vars, "\"")) %>%
+    mutate(branch_vars_count = str_count(branch_vars, ',')+1) %>%
+    
+    
+    # clean date diff fields 
+    mutate(branching_logic = case_when(
+      str_detect(branching_logic, "datediff") 
+      & str_detect(branching_logic, "true") 
+      ~ str_replace_all(tolower(branching_logic), 
+                        "datediff\\(", "\\-(as.numeric\\(difftime\\("), 
+      str_detect(branching_logic, "datediff") 
+      & str_detect(branching_logic, "true", negate=T) 
+      ~ str_replace_all(tolower(branching_logic), 
+                        "datediff\\(", "\\(as.numeric\\(difftime\\("), 
+      T ~ branching_logic
+    )) %>%
+    mutate(branching_logic = str_replace_all(tolower(branching_logic), 
+                                             ",\'y\',\'mdy\',true\\)|,\'y\',\'mdy\'\\)", 
+                                             ",units='secs'\\)\\)/31536000\\)"))
+  
+  # Transform all m-d-y dates in datediff branching logic strings to 
+  # y-m-d 
+  for (row_num in 1:nrow(dd_branching)){
+    string = dd_branching$branching_logic[row_num]
+    if(!is.na(string) & str_detect(string, 
+                                   "[:digit:][:digit:]-[:digit:][:digit:]-[:digit:][:digit:][:digit:][:digit:]")){
+      dates = str_extract_all(string, "[:digit:][:digit:]-[:digit:][:digit:]-[:digit:][:digit:][:digit:][:digit:]")
+      
+      for (x in 1:unique(length(dates[[1]]))){
+        date = dates[[1]][x]
+        
+        year = str_extract(date, "-[:digit:][:digit:][:digit:][:digit:]")
+        year = str_remove_all(year, "-")
+        month_day = str_extract(date, "[:digit:][:digit:]-[:digit:][:digit:]")
+        new_date = paste0(year, "-", month_day)
+        
+        new_string = str_replace(string, date, "date_to_be_changed")
+        string = str_replace(new_string, "date_to_be_changed", new_date)
+      }
+    }
+    dd_branching$branching_logic[row_num] = string
+  }
+  
+  
+  
+  max_num_var = max(str_count(dd_branching$branch_vars, ","), na.rm = TRUE)+1
+  
+  dd_branching_01 <- dd_branching %>%
+    # split the brach_var column so that all variable separated 
+    # by commas have there own column. 
+    separate(branch_vars, as.character(0:max(str_count(.$branch_vars, ", "), na.rm = TRUE)+1), sep=",") %>%
+    
+    # Elongate data to remove duplicate variables in branching logic and rename columns
+    gather(var, var_name, 3:(max_num_var+2)) %>%
+    
+    # Remove duplicates branching logic variables. We only need one. 
+    filter(!is.na(var_name)) %>%
+    mutate(var_name = trimws(var_name)) %>%
+    distinct(field_name, branching_logic, var_name) %>%
+    
+    # reindex variables:
+    group_by(field_name) %>%
+    mutate(var=row_number()) %>%
+    # rename numeric variable names:
+    mutate(var= paste("var", sprintf("%03d", var), sep="_")) %>%
+    
+    # spread data back out
+    spread(var, var_name) %>%
+    
+    # Remove "[]" from all branching logic. This is not needed in R. 
+    mutate(branching_logic = str_remove_all(branching_logic, "\\[")) %>%
+    mutate(branching_logic = str_remove_all(branching_logic, "\\]")) %>%
+    # translate all "=" (REDCAP syntax) to "==" (R code)
+    mutate(branching_logic = str_replace_all(branching_logic, "=", "==")) %>%
+    # because there were "!=" operators in the data, the above code transformed 
+    # them to "!==". The below code transforms them back. 
+    mutate(branching_logic = str_replace_all(branching_logic, "!==", "!=")) %>%
+    mutate(branching_logic = str_replace_all(branching_logic, "<==", "<=")) %>%
+    mutate(branching_logic = str_replace_all(branching_logic, ">==", ">=")) %>%
+    mutate(branching_logic = str_replace_all(branching_logic, "units=='secs'", "units='secs'")) %>%
+    # translate all "<>" (REDCAP syntax) to "!=" (R code)
+    mutate(branching_logic = str_replace_all(branching_logic, "\\<\\>", "!="))
+  
+  # Transform all {variable}=="" to is.na({variable})
+  for (row_num in 1:nrow(dd_branching_01)){
+    string = dd_branching_01$branching_logic[row_num]
+    if(!is.na(string) & str_detect(string, "==''")){
+      num_cases <- length(str_extract_all(string, "==''"))
+      cases <- str_replace_all(string, "_", "bazinga")
+      cases <- str_replace_all(cases, "==''", "__blank_to_na__")
+      cases <- str_extract_all(cases, "[:alpha:]+(?=__blank_to_na__)")[[1]]
+      
+      case = "normexam"
+      for (case in cases){
+        string = str_replace(string, paste0(case,"==''"), paste0("is.na(", case, ")"))
+      }
+      dd_branching_01$branching_logic[row_num] = string
+    }
+  }
+  
+  
+  
+  
+  # * Data from REDCap: ----
+  {
+    start = Sys.time()
+    # Specify static parameters for REDCap API pull:
+    formData <- list("token" = token,
+                     content='record',
+                     format='csv',
+                     type='flat',
+                     csvDelimiter='',
+                     rawOrLabel='raw',
+                     rawOrLabelHeaders='raw',
+                     exportCheckboxLabel='false',
+                     exportSurveyFields='false',
+                     exportDataAccessGroups='false',
+                     returnFormat='csv'
+    )
+    # List all fields, forms, and events to be pulled from REDCap:
+    fields = redcap_id_variable
+    forms = form
+    events = events
+    # Add fields, forms, events to the "formData" parameters list. 
+    load_fields_forms_events(fields, forms, events)
+    # Pull Data According to the parameters of "formData"
+    response <- httr::POST(url, body = formData, encode = "form")
+    redcap <- httr::content(response, col_types = cols(.default = "c")) 
+    
+    
+    qa <- redcap %>%
+      # remove completion variable, automatically added by REDCap
+      select(-(ncol(.)))
+    
+    # Clean check box fields. All checkbox fields will be one
+    # hot encoded meaning that there will be a veriable for 
+    # each response options. Each variable either has a 1 meaning 
+    # checked or a 0 meaning not checked. For this data check, 
+    # we want to know if ANY thing is checked, so the below code 
+    # unites all columns into one and if ANY thing is checked
+    # assigns the value of "at_least_one_checked", otherwise, the parent
+    # variable is NA
+    qa_checkbox_vars <- as.data.frame(colnames(qa)) %>%
+      rename(field_name=1) %>%
+      filter(str_detect(field_name, "___")) %>%
+      mutate(org_var = str_remove(field_name, "___.*"))
+    
+    all_vars <- colnames(qa)
+    
+    
+    if(nrow(qa_checkbox_vars)>0){
+      for (var in unique(qa_checkbox_vars$org_var)){
+        vars <- all_vars[which(str_detect(all_vars, paste0("^", var, "___"))==T)]
+        qa <- qa %>%
+          unite(!!all_of(var), c(vars), na.rm = T) %>%
+          mutate_at(vars(c(var)), ~ case_when(
+            str_detect(., "1") ~ "at_least_one_checked"
+          )) 
+        
+      }
+    }
+    
+    qa1 <- qa %>%
+      # Elongate Data
+      gather(var, value, 5:ncol(.)) %>%
+      # join the transformed branching logic for each variable
+      left_join(dd_branching_01, by=c("var"="field_name")) %>%
+      # determine if each variable is:
+      # "Not Missing Data" - is not blanks
+      # "Missing Data" - is blank and has no branching logic
+      # "Needs Investigation = is blank and has branching logic, so 
+      # more investigation is needed to determine if there is a reason it is missing 
+      mutate(data_check_result = case_when(
+        !is.na(value) ~ "No Missing Data", 
+        is.na(branching_logic) & is.na(value) ~ "Missing Data", 
+        T ~ "Needs Investigation"
+      ), .before = branching_logic) 
+    
+    # Data frame of of all data with no missing values and data with missing 
+    # values, but no branching logic to further investigate reasons 
+    # for missingness
+    qa_no_invest <- qa1 %>%
+      filter(data_check_result!="Needs Investigation")
+    
+    # All variables that are blank, to be investigated as
+    # to why they are blank with the branching logic. 
+    qa_invst <- qa1 %>%
+      filter(data_check_result=="Needs Investigation")
+    
+    # Export a log of each variable, the number of variables needed 
+    # to evaluate the branching logic and the time that it took
+    # to evaluate the branching logic. 
+    log <- tibble(field_name="", field_num="", branchlog_num="", dur="") %>%
+      filter(field_name !="") %>%
+      mutate(field_num = as.numeric(field_num), 
+             branchlog_num = as.numeric(branchlog_num), 
+             dur = as.numeric(dur))
+    
+    # For the varibles that need to be investigated, which 
+    # varibales are needed to evaluate all branching logic in the form
+    
+    if(nrow(qa_invst)>0){
+      var_needed_for_lookup <- qa_invst %>%
+        select(var_001:ncol(.)) %>%
+        gather(var, value, var_001:ncol(.)) %>%
+        distinct(value) %>%
+        select(value) %>%
+        filter(!is.na(value)) %>%
+        rename(field_name = value) %>%
+        mutate(field_name = str_remove_all(field_name, "___.*"))
+      
+      # Export all additional varaibles needed either within
+      # or outdide of the form being evaluated. 
+      formData <- list("token" = token,
+                       content='record',
+                       format='csv',
+                       type='flat',
+                       csvDelimiter='',
+                       rawOrLabel='raw',
+                       rawOrLabelHeaders='raw',
+                       exportCheckboxLabel='false',
+                       exportSurveyFields='false',
+                       exportDataAccessGroups='false',
+                       returnFormat='csv'
+      )
+      # List all fields, forms, and events to be pulled from REDCap:
+      fields = c(redcap_id_variable, all_of(var_needed_for_lookup$field_name))
+      forms = NULL
+      events = events
+      # Add fields, forms, events to the "formData" parameters list. 
+      load_fields_forms_events(fields, forms, events)
+      # Pull Data According to the parameters of "formData"
+      response <- httr::POST(url, body = formData, encode = "form")
+      look_up_vars <- httr::content(response, col_types = cols(.default = "c")) %>%
+        # Elongate Data
+        gather(var_check, value_check, 5:ncol(.)) %>%
+        mutate(value_check=tolower(value_check))
+      
+      
+      # iterate through each variable, assessing each branching logic to 
+      # determine whether the variable should be blank. 
+      
+      length(unique(qa_invst$var)) # number of variables in form
+      qa_missning = NULL
+      var = unique(qa_invst$var)[66]
+      for (var in unique(qa_invst$var)){
+        start_sub = Sys.time() # start time
+        target_var = var # identify current variable
+        
+        # data frame with only data from current varaible
+        data <- qa_invst %>%
+          filter(var==target_var)
+        
+        
+        # evaluate the number of variables needed in the branching 
+        # logic, and return a list of those variables. 
+        branch_vars_df <- qa_invst %>%
+          filter(var==target_var) %>%
+          select(var_001:ncol(.))
+        
+        not_all_na <- function(x) any(!is.na(x))
+        
+        branch_index_vars_df <- branch_vars_df %>%
+          select_if(not_all_na)
+        branch_index_vars <- colnames(branch_index_vars_df)
+        
+        branch_vars = unname(unlist(branch_vars_df[1,]))
+        branch_vars = branch_vars[!is.na(branch_vars)]
+        
+        # Loop through all variables needed in branching logic
+        # to grab the values of those variables, needed to 
+        # fully evaluate the branching logic and determine
+        # whether the variable should have been hidden. 
+        for (x in 1:length(branch_vars)){
+          
+          var_index = paste("var", sprintf("%03d", x), sep="_")
+          
+          data <- data %>%
+            # rename the current variable from var_00# to "var_check", 
+            # which is needed to join the lookup data to add the value_check 
+            # variable with the value for that variable. 
+            dplyr::rename(var_check=all_of(var_index)) %>%
+            # join the look up data set to add the values 
+            left_join(look_up_vars, by=c("global_id", "redcap_event_name", 
+                                         "redcap_repeat_instrument", 
+                                         "redcap_repeat_instance", "var_check")) %>%
+            # # rename variable from "value_check",  to actual
+            # variable name needed in evaluating branching logic
+            dplyr::rename(!!branch_vars[x]:=value_check) %>%
+            select(-var_check)
+          
+        }
+        
+        parsed_string <- parse(text=data$branching_logic[1])
+        
+        data1 <- data %>%
+          # select the first 8 columns information on each value, and the 
+          # variables created in the above for loop neccessary to evaluate 
+          # the branching logic
+          select(1:8, branch_vars) %>%
+          # evaluate branching logic 
+          mutate(data_check_result= case_when(
+            eval(parsed_string) & is.na(value) ~ "Missing Data",
+            T ~ "Hidden Field"
+          )) %>%
+          # replace all NAs with " " 
+          # mutate_all(~as.character(.)) %>%
+          # mutate_all(na_if,"") %>%
+          mutate_at(vars(c(9:ncol(.))), ~str_replace_na(., "' '")) %>%
+          # concatenate column name with value so that end user can determine
+          # why the field was hidden or not hidden. 
+          mutate(across(c(9:ncol(.)),~ paste0(cur_column(),' == ',.))) %>%
+          # rename column names back to var_001, var_002, ect, 
+          # so that all rows can be binded together for final output
+          rename_with(~ all_of(branch_index_vars),
+                      all_of(branch_vars))
+        
+        # Bind final output together after each iteration
+        if (var == qa_invst$var[1]){
+          qa_missning <- data1
+        } else {
+          qa_missning <- bind_rows(qa_missning, data1)
+        }
+        
+        end_sub = Sys.time()
+        
+        # add to log file for each variable in the form. 
+        log <- log %>%
+          add_row(field_name = target_var,
+                  field_num=which(unique(qa_invst$var)==var), 
+                  branchlog_num = length(branch_vars), 
+                  dur = as.numeric(difftime(end_sub,start_sub, units="secs")))
+        
+        # print information in log file, so the person running the code can
+        # see the code progress. 
+        cat(which(unique(qa_invst$var)==var),"out of", length(unique(qa_invst$var)),"| #BranchVars:", length(branch_vars), "|", end_sub-start_sub, "\n")
+      }
+      
+      # print final data check for all non-missing data, missing data that was hidden
+      # and missing data that was not hidden. 
+      qa_final <- bind_rows(qa_no_invest, qa_missning)
+      
+      end = Sys.time()
+      
+      duration <- difftime(end,start, units="secs")
+    }else{
+      qa_final <- qa_no_invest
+    }
+  }
+  
+  qa_final_01 <- qa_final %>%
+    select(-branching_logic) %>%
+    rename(field_name=var) %>%
+    left_join(dd[c("field_name", "branching_logic")])
+
+  # * Data Check Summary: ----
+  # Summary of hidden, not missing and missing data
+  summ <- qa_final %>%
+    group_by(data_check_result) %>%
+    summarise(n=n()) %>%
+    add_row(data_check_result = "Hidden Field", n=0) %>%
+    add_row(data_check_result = "Missing Data", n=0) %>%
+    add_row(data_check_result = "No Missing Data", n=0) %>%
+    distinct(data_check_result, .keep_all=T) %>%
+    arrange(match(data_check_result, c("No Missing Data", 
+                                       "Hidden Field", 
+                                       "No Missing Data")))
+  
+  qa_errors <- qa_final %>%
+    filter(data_check_result=="Missing Data")
+  
+  # Summary of how often each field in the form is missing:
+  summ_error_var <- qa_errors %>% 
+    group_by(var) %>%
+    summarise(n=n()) %>%
+    adorn_totals() %>%
+    rename(field_name=var)
+  
+  all_vars_summ <- dd %>% 
+    filter(form_name==form) %>%
+    select(field_name) %>%
+    left_join(summ_error_var) %>%
+    left_join(log) %>%
+    select(-field_num) %>%
+    mutate(n = case_when(
+      is.na(n) ~ 0, 
+      T ~ n
+    )) %>%
+    mutate(branchlog_num = case_when(
+      is.na(branchlog_num) ~ 0, 
+      T ~ branchlog_num
+    )) %>%
+    arrange(field_name) %>%
+    rename(n_missing= n) %>%
+    rename(dur_s=dur)
+  
+  # * Export:----
+  write.csv(qa_final, paste0(output_loc, form, "_FinalDataCheckAll.csv"), 
+            row.names = F)
+  write.csv(qa_errors, paste0(output_loc, form, "_FinalErrors.csv"), 
+            row.names = F)
+  write.csv(summ, paste0(output_loc, form, "_Summary.csv"), 
+            row.names = F)
+  write.csv(all_vars_summ, paste0(output_loc, form, "_FieldSummary.csv"), 
+            row.names = F)
+  
+  
+}
+
+
+# * User Defined Variables: ----
+redcap_id_variable = c("global_id")
+form = c("a1")
+events = c("uds visit")
+token = "D0EF4875277DF82D8EF3DB4AEBB2D327"
+output_loc = paste0(od_loc, "MC Data Management/",
+                    "Data Organization and Planning/Data Checks/Output/")
+
+#example:
+redcap_missing_data(redcap_id_variable=c("global_id"), 
+                    form=c("a1"), 
+                    events=c("uds visit"), 
+                    token="D0EF4875277DF82D8EF3DB4AEBB2D327", 
+                    url = "https://redcap.nubic.northwestern.edu/redcap/api/",
+                    output_loc = paste0(od_loc, "MC Data Management/",
+                                        "Data Organization and Planning/Data Checks/Output/"))
+
